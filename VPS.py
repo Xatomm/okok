@@ -1,9 +1,11 @@
 import asyncio
 import websockets
 import json
+import os
 
 clients = {}
 host = None
+PORT = 8080
 
 async def handler(ws):
     global host
@@ -53,6 +55,7 @@ async def handler(ws):
         for k, v in list(clients.items()):
             if v == ws:
                 del clients[k]
+                print(f"[CLIENT] {k} déconnecté")
                 if host:
                     await host.send(json.dumps({
                         "event": "disconnect",
@@ -60,8 +63,21 @@ async def handler(ws):
                     }))
 
 async def main():
-    async with websockets.serve(handler, "0.0.0.0", 8080):
-        print("Relay WebSocket actif")
-        await asyncio.Future()
+    print("=" * 50)
+    print("Relay WebSocket démarré")
+    print()
+    print("⚠️ OBLIGATOIRE :")
+    print("1) Clique sur : Web Preview → Preview on port 8080")
+    print("2) Copie l'URL HTTPS affichée dans le navigateur")
+    print("3) Remplace https:// par wss:// dans tes scripts")
+    print()
+    print("📌 Exemple :")
+    print("   https://8080-xxxx.cloudshell.dev")
+    print("→ wss://8080-xxxx.cloudshell.dev")
+    print("=" * 50)
+    print()
+
+    async with websockets.serve(handler, "0.0.0.0", PORT):
+        await asyncio.Future()  # run forever
 
 asyncio.run(main())
