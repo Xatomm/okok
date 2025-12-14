@@ -1,42 +1,78 @@
 import socket
 import threading
+import time
 
-HOST = '0.0.0.0'
-PORT = 12345
+# -----------------------------
+# CONFIGURATION
+# -----------------------------
+LISTEN_HOST = "0.0.0.0"  # Écoute toutes les interfaces
+LISTEN_PORT = 12345      # Port du relay
+SERVER_HOST = "127.0.0.1"  # IP locale de ton serveur GUI (depuis le VPS, ngrok redirigera)
+SERVER_PORT = 5000          # Port TCP du serveur GUI
 
-def handle_client(client_socket, server_host, server_port):
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.connect((server_host, server_port))
+# -----------------------------
+# CLIENT HANDLER
+# -----------------------------
+clients = []
 
-    def forward(src, dst):
+def handle_client(client_socket, addr):
+    print(f"[Relay] Nouveau client connecté: {addr}")
+    clients.append(client_socket)
+
+    # Connexion au serveur GUI
+    try:
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.connect((SERVER_HOST, SERVER_PORT))
+        print(f"[Relay] Connecté au serveur GUI {SERVER_HOST}:{SERVER_PORT}")
+    except Exception as e:
+        print(f"[Relay] Impossible de se connecter au serveur GUI: {e}")
+        client_socket.close()
+        return
+
+    # Thread pour relayer client → serveur
+    def client_to_server():
         while True:
             try:
-                data = src.recv(4096)
+                data = client_socket.recv(4096)
                 if not data:
                     break
-                dst.sendall(data)
+                server_socket.sendall(data)
             except:
                 break
+        client_socket.close()
+        server_socket.close()
+        print(f"[Relay] Client {addr} déconnecté")
 
-    threading.Thread(target=forward, args=(client_socket, server_socket), daemon=True).start()
-    threading.Thread(target=forward, args=(server_socket, client_socket), daemon=True).start()
+    # Thread pour relayer serveur → client
+    def server_to_client():
+        while True:
+            try:
+                data = server_socket.recv(4096)
+                if not data:
+                    break
+                client_socket.sendall(data)
+            except:
+                break
+        client_socket.close()
+        server_socket.close()
 
-    # quand le client ou le serveur ferme la connexion
-    client_socket.close()
-    server_socket.close()
+    threading.Thread(target=client_to_server, daemon=True).start()
+    threading.Thread(target=server_to_client, daemon=True).start()
 
+# -----------------------------
+# MAIN
+# -----------------------------
 def main():
-    SERVER_HOST = '127.0.0.1'  # ton PC
-    SERVER_PORT = 5000          # port où tourne ton GUI
-
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.bind((HOST, PORT))
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind((LISTEN_HOST, LISTEN_PORT))
     listener.listen(10)
-    print(f"[Relay] Écoute sur {HOST}:{PORT}")
+    print(f"[Relay] Écoute sur {LISTEN_HOST}:{LISTEN_PORT}")
 
     while True:
         client_sock, addr = listener.accept()
-        threading.Thread(target=handle_client, args=(client_sock, SERVER_HOST, SERVER_PORT), daemon=True).start()
+        threading.Thread(target=handle_client, args=(client_sock, addr), daemon=True).start()
 
 if __name__ == "__main__":
     main()
+
