@@ -1,167 +1,125 @@
 import sys
-import json
 import socket
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
-
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTableWidget, QTableWidgetItem, QFileDialog,
-    QLineEdit, QLabel, QMessageBox, QHeaderView
+    QLineEdit, QLabel, QMessageBox, QHeaderView, QTextEdit
 )
-from PyQt6.QtCore import Qt
 
 # -----------------------------
-# Server / Client Management
+# CONFIGURATION NGROK RELAY
 # -----------------------------
+RELAY_HOST = "7.tcp.eu.ngrok.io"  # Remplace par ton host Ngrok
+RELAY_PORT = 16420                 # Remplace par ton port Ngrok
+RECONNECT_DELAY = 5                # secondes entre les tentatives
 
+# -----------------------------
+# CLIENT INFO
+# -----------------------------
 class ClientInfo:
-    def __init__(self, client_id, addr, sock, name="", os="", last_seen=None):
+    def __init__(self, client_id, sock, addr=None, name="RemoteClient", os="Unknown"):
         self.client_id = client_id
-        self.addr = addr
         self.sock = sock
+        self.addr = addr or ("Relay", 0)
         self.name = name
         self.os = os
-        self.last_seen = last_seen or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.last_seen = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-
-class ServerThread(threading.Thread):
-    def __init__(self, gui, host="0.0.0.0", port=5000):
+# -----------------------------
+# THREAD RELAY
+# -----------------------------
+class RelayThread(threading.Thread):
+    def __init__(self, gui):
         super().__init__(daemon=True)
         self.gui = gui
-        self.host = host
-        self.port = port
-        self.server_socket = None
+        self.sock = None
         self.running = True
         self.client_counter = 0
         self.clients = {}
 
     def run(self):
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        RELAY_HOST = "8080-cs-xxxxx.cloudshell.dev"
-        RELAY_PORT = 443
-        SESSION_ID = "123456"
-
-        
-        self.server_socket.connect((RELAY_HOST, RELAY_PORT))
-        self.server_socket.send(SESSION_ID.encode())
-
-        client_info = ClientInfo(1, ("RELAY", 0), sock)
-        self.clients[1] = client_info
-        self.gui.add_client_to_table(client_info)
-
-        self.handle_client(client_info)
-
-
         while self.running:
             try:
-                client_sock, addr = self.server_socket.accept()
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                print(f"[INFO] Connexion au relay {RELAY_HOST}:{RELAY_PORT} …")
+                self.sock.connect((RELAY_HOST, RELAY_PORT))
+                print("[INFO] Connecté au relay !")
+                self.gui.append_terminal("[INFO] Connecté au relay !")
+
+                # Commence à écouter les messages entrants
+                self.listen_to_clients()
+            except Exception as e:
+                print(f"[ERROR] Impossible de se connecter, nouvelle tentative dans {RECONNECT_DELAY}s … {e}")
+                self.gui.append_terminal(f"[ERROR] Impossible de se connecter, nouvelle tentative dans {RECONNECT_DELAY}s … {e}")
+                time.sleep(RECONNECT_DELAY)
+
+    def listen_to_clients(self):
+        """Écoute et gère les messages entrants du relay (clients)"""
+        while self.running:
+            try:
+                data = self.sock.recv(4096)
+                if not data:
+                    break
+
+                message = data.decode(errors='ignore')
                 self.client_counter += 1
                 cid = self.client_counter
 
-                client_info = ClientInfo(cid, addr, client_sock)
+                client_info = ClientInfo(cid, self.sock)
                 self.clients[cid] = client_info
-
                 self.gui.add_client_to_table(client_info)
-
-                threading.Thread(target=self.handle_client, args=(client_info,), daemon=True).start()
-
-            except Exception:
-                break
-
-    def handle_client(self, client_info):
-        sock = client_info.sock
-        cid = client_info.client_id
-
-        sock.settimeout(0.5)  # Timeout pour éviter blocage infini
-
-        while True:
-            try:
-                try:
-                    data = sock.recv(1024)
-                except socket.timeout:
-                    continue  # pas de données mais le client est toujours là
-
-                if not data:
-                    # Vérifier si la socket est réellement fermée
-                    if self.is_socket_closed(sock):
-                        break
-                    else:
-                        continue
-
-                text = data.decode()
-                client_info.last_seen = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                self.gui.update_client_row(client_info)
-                self.gui.append_terminal(f"[Client {cid}] → {text}")
+                self.gui.append_terminal(f"[Client {cid}] → {message}")
 
             except Exception as e:
-                print(f"[Erreur client {cid}] {e}")
+                print("[ERROR] Perte de connexion relay :", e)
+                self.gui.append_terminal(f"[ERROR] Perte de connexion relay : {e}")
                 break
 
-        del self.clients[cid]
-        self.gui.remove_client(cid)
-
-
-    def is_socket_closed(self, sock):
-        try:
-            sock.setblocking(0)
-            data = sock.recv(16)
-            if data == b'':
-                return True
-        except BlockingIOError:
-            return False
-        except Exception:
-            return True
-        finally:
-            sock.setblocking(1)
-        return False
-
+        self.sock.close()
+        self.clients.clear()
+        self.gui.clear_clients()
 
     def send_to_client(self, cid, message):
         if cid in self.clients:
             try:
                 self.clients[cid].sock.send(message.encode())
                 return True
-            except:
+            except Exception as e:
+                print("[ERROR] Impossible d'envoyer la commande :", e)
                 return False
         return False
 
     def stop(self):
         self.running = False
-        try:
-            self.server_socket.close()
-        except:
-            pass
-
+        if self.sock:
+            self.sock.close()
 
 # -----------------------------
 # GUI
 # -----------------------------
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Xa1om")
+        self.setWindowTitle("Xa1om - Server GUI")
         self.resize(900, 600)
 
         self.json_folder = None
         self.json_data = {}
 
-        self.server = ServerThread(self)
-        self.server.start()
+        self.relay_thread = RelayThread(self)
+        self.relay_thread.start()
 
         self.setup_ui()
 
     def setup_ui(self):
         layout = QVBoxLayout()
 
-        # Terminal output
-        term_label = QLabel("Terminal / Résultats des commandes :")
-        layout.addWidget(term_label)
-
-        from PyQt6.QtWidgets import QTextEdit
+        # Terminal
+        layout.addWidget(QLabel("Terminal / Résultats :"))
         self.terminal = QTextEdit()
         self.terminal.setReadOnly(True)
         self.terminal.setFixedHeight(180)
@@ -173,34 +131,27 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.table)
 
-        # Command sender
+        # Command input
         cmd_layout = QHBoxLayout()
-
         self.cmd_input = QLineEdit()
-        self.cmd_input.setPlaceholderText("Entrez une commande symbolique… (ex : PING, ECHO:Hello)")
+        self.cmd_input.setPlaceholderText("Entrez une commande (ex : PING, ECHO:Hello)")
         cmd_layout.addWidget(self.cmd_input)
-
         send_btn = QPushButton("Envoyer au client sélectionné")
         send_btn.clicked.connect(self.send_command)
         cmd_layout.addWidget(send_btn)
-
         layout.addLayout(cmd_layout)
 
-        # JSON controls
+        # JSON buttons
         json_layout = QHBoxLayout()
-
-        btn_load = QPushButton("Charger fichier JSON")
+        btn_load = QPushButton("Charger JSON")
         btn_load.clicked.connect(self.load_json)
-        json_layout.addWidget(btn_load)
-
         btn_save = QPushButton("Sauvegarder JSON")
         btn_save.clicked.connect(self.save_json)
-        json_layout.addWidget(btn_save)
-
         btn_set_folder = QPushButton("Choisir dossier clients")
         btn_set_folder.clicked.connect(self.choose_folder)
+        json_layout.addWidget(btn_load)
+        json_layout.addWidget(btn_save)
         json_layout.addWidget(btn_set_folder)
-
         layout.addLayout(json_layout)
 
         container = QWidget()
@@ -208,21 +159,16 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(container)
 
     # -----------------------------
-    # Client Table Handling
+    # Table clients
     # -----------------------------
-
     def add_client_to_table(self, client_info):
         row = self.table.rowCount()
         self.table.insertRow(row)
-
         self.table.setItem(row, 0, QTableWidgetItem(str(client_info.client_id)))
         self.table.setItem(row, 1, QTableWidgetItem(client_info.name))
         self.table.setItem(row, 2, QTableWidgetItem(client_info.os))
-        self.table.setItem(row, 3, QTableWidgetItem(client_info.addr[0]))
+        self.table.setItem(row, 3, QTableWidgetItem(str(client_info.addr[0])))
         self.table.setItem(row, 4, QTableWidgetItem(client_info.last_seen))
-
-    def append_terminal(self, text):
-        self.terminal.append(text)
 
     def update_client_row(self, client_info):
         for row in range(self.table.rowCount()):
@@ -236,14 +182,19 @@ class MainWindow(QMainWindow):
                 self.table.removeRow(row)
                 break
 
-    # -----------------------------
-    # Command Sending
-    # -----------------------------
+    def clear_clients(self):
+        self.table.setRowCount(0)
 
+    def append_terminal(self, text):
+        self.terminal.append(text)
+
+    # -----------------------------
+    # Command sending
+    # -----------------------------
     def send_command(self):
         selected = self.table.currentRow()
         if selected < 0:
-            QMessageBox.warning(self, "Erreur", "Sélectionne un client dans la liste.")
+            QMessageBox.warning(self, "Erreur", "Sélectionnez un client dans la liste.")
             return
 
         cid = int(self.table.item(selected, 0).text())
@@ -251,15 +202,13 @@ class MainWindow(QMainWindow):
         if not cmd:
             return
 
-        success = self.server.send_to_client(cid, cmd)
-
+        success = self.relay_thread.send_to_client(cid, cmd)
         if not success:
             QMessageBox.warning(self, "Erreur", "Impossible d'envoyer la commande.")
 
     # -----------------------------
-    # JSON Handling
+    # JSON
     # -----------------------------
-
     def choose_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Choisir un dossier")
         if folder:
@@ -269,38 +218,32 @@ class MainWindow(QMainWindow):
         file, _ = QFileDialog.getOpenFileName(self, "Ouvrir JSON", "", "JSON Files (*.json)")
         if not file:
             return
-
+        import json
         with open(file, "r") as f:
             self.json_data = json.load(f)
-
         QMessageBox.information(self, "OK", "JSON chargé.")
 
     def save_json(self):
         if not self.json_folder:
-            QMessageBox.warning(self, "Erreur", "Choisis un dossier client d'abord.")
+            QMessageBox.warning(self, "Erreur", "Choisir un dossier clients d'abord.")
             return
-
+        import json
         file = self.json_folder / "clients.json"
         data = {}
-
-        for cid, client in self.server.clients.items():
+        for cid, client in self.relay_thread.clients.items():
             data[str(cid)] = {
                 "name": client.name,
                 "os": client.os,
-                "ip": client.addr[0],
+                "ip": str(client.addr[0]),
                 "last_seen": client.last_seen
             }
-
         with open(file, "w") as f:
             json.dump(data, f, indent=4)
-
         QMessageBox.information(self, "OK", f"Données sauvegardées dans {file}")
 
-
 # -----------------------------
-# App Start
+# MAIN
 # -----------------------------
-
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()

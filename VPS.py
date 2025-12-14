@@ -1,83 +1,42 @@
-import asyncio
-import websockets
-import json
-import os
+import socket
+import threading
 
-clients = {}
-host = None
-PORT = 8080
+HOST = '0.0.0.0'
+PORT = 12345
 
-async def handler(ws):
-    global host
-    try:
-        raw = await ws.recv()
-        info = json.loads(raw)
+def handle_client(client_socket, server_host, server_port):
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.connect((server_host, server_port))
 
-        if info["role"] == "host":
-            host = ws
-            print("[HOST] connecté")
+    def forward(src, dst):
+        while True:
+            try:
+                data = src.recv(4096)
+                if not data:
+                    break
+                dst.sendall(data)
+            except:
+                break
 
-            while True:
-                msg = await ws.recv()
-                data = json.loads(msg)
+    threading.Thread(target=forward, args=(client_socket, server_socket), daemon=True).start()
+    threading.Thread(target=forward, args=(server_socket, client_socket), daemon=True).start()
 
-                target = data["target"]
-                payload = data["data"]
+    # quand le client ou le serveur ferme la connexion
+    client_socket.close()
+    server_socket.close()
 
-                if target in clients:
-                    await clients[target].send(json.dumps({
-                        "from": "host",
-                        "data": payload
-                    }))
+def main():
+    SERVER_HOST = '127.0.0.1'  # ton PC
+    SERVER_PORT = 5000          # port où tourne ton GUI
 
-        elif info["role"] == "client":
-            cid = info["id"]
-            clients[cid] = ws
-            print(f"[CLIENT] {cid} connecté")
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind((HOST, PORT))
+    listener.listen(10)
+    print(f"[Relay] Écoute sur {HOST}:{PORT}")
 
-            if host:
-                await host.send(json.dumps({
-                    "event": "new_client",
-                    "id": cid
-                }))
+    while True:
+        client_sock, addr = listener.accept()
+        threading.Thread(target=handle_client, args=(client_sock, SERVER_HOST, SERVER_PORT), daemon=True).start()
 
-            while True:
-                msg = await ws.recv()
-                if host:
-                    await host.send(json.dumps({
-                        "from": cid,
-                        "data": msg
-                    }))
-
-    except:
-        pass
-    finally:
-        for k, v in list(clients.items()):
-            if v == ws:
-                del clients[k]
-                print(f"[CLIENT] {k} déconnecté")
-                if host:
-                    await host.send(json.dumps({
-                        "event": "disconnect",
-                        "id": k
-                    }))
-
-async def main():
-    print("=" * 50)
-    print("Relay WebSocket démarré")
-    print()
-    print("⚠️ OBLIGATOIRE :")
-    print("1) Clique sur : Web Preview → Preview on port 8080")
-    print("2) Copie l'URL HTTPS affichée dans le navigateur")
-    print("3) Remplace https:// par wss:// dans tes scripts")
-    print()
-    print("📌 Exemple :")
-    print("   https://8080-xxxx.cloudshell.dev")
-    print("→ wss://8080-xxxx.cloudshell.dev")
-    print("=" * 50)
-    print()
-
-    async with websockets.serve(handler, "0.0.0.0", PORT):
-        await asyncio.Future()  # run forever
-
-asyncio.run(main())
+if __name__ == "__main__":
+    main()
