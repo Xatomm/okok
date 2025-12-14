@@ -1,46 +1,67 @@
-import socket
-import threading
+import asyncio
+import websockets
+import json
 
-HOST = "0.0.0.0"
-PORT = 8080
+clients = {}
+host = None
 
-sessions = {}
-
-def pipe(a, b):
+async def handler(ws):
+    global host
     try:
-        while True:
-            data = a.recv(4096)
-            if not data:
-                break
-            b.sendall(data)
+        raw = await ws.recv()
+        info = json.loads(raw)
+
+        if info["role"] == "host":
+            host = ws
+            print("[HOST] connecté")
+
+            while True:
+                msg = await ws.recv()
+                data = json.loads(msg)
+
+                target = data["target"]
+                payload = data["data"]
+
+                if target in clients:
+                    await clients[target].send(json.dumps({
+                        "from": "host",
+                        "data": payload
+                    }))
+
+        elif info["role"] == "client":
+            cid = info["id"]
+            clients[cid] = ws
+            print(f"[CLIENT] {cid} connecté")
+
+            if host:
+                await host.send(json.dumps({
+                    "event": "new_client",
+                    "id": cid
+                }))
+
+            while True:
+                msg = await ws.recv()
+                if host:
+                    await host.send(json.dumps({
+                        "from": cid,
+                        "data": msg
+                    }))
+
     except:
         pass
     finally:
-        a.close()
-        b.close()
+        for k, v in list(clients.items()):
+            if v == ws:
+                del clients[k]
+                if host:
+                    await host.send(json.dumps({
+                        "event": "disconnect",
+                        "id": k
+                    }))
 
-def handle(conn):
-    try:
-        session = conn.recv(64).decode().strip()
-        print(f"[+] Connexion session {session}")
+async def main():
+    async with websockets.serve(handler, "0.0.0.0", 8080):
+        print("Relay WebSocket actif")
+        await asyncio.Future()
 
-        sessions.setdefault(session, []).append(conn)
-
-        if len(sessions[session]) == 2:
-            a, b = sessions[session]
-            print(f"[✓] Session {session} reliée")
-            threading.Thread(target=pipe, args=(a,b), daemon=True).start()
-            threading.Thread(target=pipe, args=(b,a), daemon=True).start()
-
-    except:
-        conn.close()
-
-server = socket.socket()
-server.bind((HOST, PORT))
-server.listen(10)
-
-print(f"[+] Relais actif sur port {PORT}")
-
-while True:
-    conn, _ = server.accept()
-    threading.Thread(target=handle, args=(conn,), daemon=True).start()
+asyncio.run(main())
