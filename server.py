@@ -40,8 +40,20 @@ class ServerThread(threading.Thread):
 
     def run(self):
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.bind((self.host, self.port))
-        self.server_socket.listen(10)
+        RELAY_HOST = "8080-cs-xxxxx.cloudshell.dev"
+        RELAY_PORT = 443
+        SESSION_ID = "123456"
+
+        
+        self.server_socket.connect((RELAY_HOST, RELAY_PORT))
+        self.server_socket.send(SESSION_ID.encode())
+
+        client_info = ClientInfo(1, ("RELAY", 0), sock)
+        self.clients[1] = client_info
+        self.gui.add_client_to_table(client_info)
+
+        self.handle_client(client_info)
+
 
         while self.running:
             try:
