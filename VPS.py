@@ -1,3 +1,4 @@
+# relay_tcp.py
 import socket
 import threading
 import time
@@ -5,63 +6,66 @@ import time
 # -----------------------------
 # CONFIGURATION
 # -----------------------------
-LISTEN_HOST = "0.0.0.0"  # Écoute toutes les interfaces
-LISTEN_PORT = 12345      # Port du relay
-SERVER_HOST = "127.0.0.1"  # IP locale de ton serveur GUI (depuis le VPS, ngrok redirigera)
-SERVER_PORT = 5000          # Port TCP du serveur GUI
+LISTEN_HOST = "0.0.0.0"     # Écoute sur toutes les interfaces
+LISTEN_PORT = 12345         # Port public pour NGROK
+SERVER_HOST = "4.tcp.eu.ngrok.io"   # Adresse du serveur GUI (modifie si exposé via NGROK)
+SERVER_PORT = 10283           # Port du serveur GUI
 
 # -----------------------------
-# CLIENT HANDLER
+# GESTION CLIENT
 # -----------------------------
-clients = []
+clients = {}
+clients_lock = threading.Lock()
 
-def handle_client(client_socket, addr):
-    print(f"[Relay] Nouveau client connecté: {addr}")
-    clients.append(client_socket)
 
-    # Connexion au serveur GUI
+def forward(src_sock, dst_sock):
+    """Forward toutes les données entre deux sockets."""
     try:
-        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_socket.connect((SERVER_HOST, SERVER_PORT))
+        while True:
+            data = src_sock.recv(4096)
+            if not data:
+                break
+            dst_sock.sendall(data)
+    except Exception as e:
+        print(f"[Forward] Erreur : {e}")
+    finally:
+        src_sock.close()
+        dst_sock.close()
+
+
+def handle_client(client_sock, client_addr):
+    print(f"[Relay] Nouveau client connecté: {client_addr}")
+
+    try:
+        # Connecte le relay au serveur GUI
+        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_sock.connect((SERVER_HOST, SERVER_PORT))
         print(f"[Relay] Connecté au serveur GUI {SERVER_HOST}:{SERVER_PORT}")
     except Exception as e:
         print(f"[Relay] Impossible de se connecter au serveur GUI: {e}")
-        client_socket.close()
+        client_sock.close()
         return
 
-    # Thread pour relayer client → serveur
-    def client_to_server():
-        while True:
-            try:
-                data = client_socket.recv(4096)
-                if not data:
-                    break
-                server_socket.sendall(data)
-            except:
-                break
-        client_socket.close()
-        server_socket.close()
-        print(f"[Relay] Client {addr} déconnecté")
+    # Stockage client
+    with clients_lock:
+        clients[client_addr] = (client_sock, server_sock)
 
-    # Thread pour relayer serveur → client
-    def server_to_client():
-        while True:
-            try:
-                data = server_socket.recv(4096)
-                if not data:
-                    break
-                client_socket.sendall(data)
-            except:
-                break
-        client_socket.close()
-        server_socket.close()
+    # Threads pour forward bidirectionnel
+    t1 = threading.Thread(target=forward, args=(client_sock, server_sock), daemon=True)
+    t2 = threading.Thread(target=forward, args=(server_sock, client_sock), daemon=True)
+    t1.start()
+    t2.start()
 
-    threading.Thread(target=client_to_server, daemon=True).start()
-    threading.Thread(target=server_to_client, daemon=True).start()
+    # Attend que les deux threads se terminent
+    t1.join()
+    t2.join()
 
-# -----------------------------
-# MAIN
-# -----------------------------
+    with clients_lock:
+        del clients[client_addr]
+
+    print(f"[Relay] Client déconnecté: {client_addr}")
+
+
 def main():
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -70,9 +74,9 @@ def main():
     print(f"[Relay] Écoute sur {LISTEN_HOST}:{LISTEN_PORT}")
 
     while True:
-        client_sock, addr = listener.accept()
-        threading.Thread(target=handle_client, args=(client_sock, addr), daemon=True).start()
+        client_sock, client_addr = listener.accept()
+        threading.Thread(target=handle_client, args=(client_sock, client_addr), daemon=True).start()
+
 
 if __name__ == "__main__":
     main()
-
